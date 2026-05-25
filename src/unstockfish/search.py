@@ -8,6 +8,7 @@ import chess
 
 from .constants import DEFAULT_MAX_DEPTH, INF, MATE_SCORE
 from .eval import evaluate, PIECE_VALUES_MG
+from .hashing import position_key
 from .tt import Bound, TranspositionTable
 
 if TYPE_CHECKING:
@@ -81,7 +82,7 @@ class Searcher:
         best_score = -INF
         best_move = None
 
-        entry = self.tt.get(board.transposition_key())
+        entry = self.tt.get(position_key(board))
         tt_move = entry.move if entry else None
 
         moves = list(board.legal_moves)
@@ -108,7 +109,7 @@ class Searcher:
 
         if best_move is not None and not self._should_stop():
             self.tt.store(
-                board.transposition_key(),
+                position_key(board),
                 depth,
                 best_score,
                 Bound.EXACT,
@@ -129,7 +130,7 @@ class Searcher:
         if board.is_repetition(2) or board.can_claim_draw():
             return 0
 
-        key = board.transposition_key()
+        key = position_key(board)
         entry = self.tt.get(key)
         if entry and entry.depth >= depth:
             if entry.bound == Bound.EXACT:
@@ -255,7 +256,7 @@ class Searcher:
         pv: list[chess.Move] = []
         probe = board.copy()
         for _ in range(depth):
-            entry = self.tt.get(probe.transposition_key())
+            entry = self.tt.get(position_key(probe))
             if entry is None or entry.move is None:
                 break
             move = entry.move
