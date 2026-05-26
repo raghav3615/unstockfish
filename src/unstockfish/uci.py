@@ -106,6 +106,7 @@ class UCIController:
     def _handle_go(self, tokens: list[str]) -> None:
         depth = None
         movetime = None
+        nodes = None
         wtime = None
         btime = None
         winc = 0
@@ -121,6 +122,9 @@ class UCIController:
                 i += 2
             elif t == "movetime" and i + 1 < len(tokens):
                 movetime = int(tokens[i + 1])
+                i += 2
+            elif t == "nodes" and i + 1 < len(tokens):
+                nodes = int(tokens[i + 1])
                 i += 2
             elif t == "wtime" and i + 1 < len(tokens):
                 wtime = int(tokens[i + 1])
@@ -150,7 +154,7 @@ class UCIController:
         if depth is None and time_ms is None and not infinite:
             depth = 6
 
-        limits = SearchLimits(depth=depth, time_ms=time_ms, infinite=infinite)
+        limits = SearchLimits(depth=depth, time_ms=time_ms, nodes=nodes, infinite=infinite)
         self._start_search(limits)
 
     def _compute_time_ms(

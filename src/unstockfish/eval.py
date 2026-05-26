@@ -34,6 +34,36 @@ PHASE_WEIGHTS = {
 MAX_PHASE = 24
 BISHOP_PAIR_BONUS = 30
 
+MOBILITY_WEIGHTS_MG = {
+    chess.KNIGHT: 4,
+    chess.BISHOP: 5,
+    chess.ROOK: 3,
+    chess.QUEEN: 2,
+}
+
+MOBILITY_WEIGHTS_EG = {
+    chess.KNIGHT: 4,
+    chess.BISHOP: 5,
+    chess.ROOK: 4,
+    chess.QUEEN: 2,
+}
+
+DOUBLED_PAWN_PENALTY_MG = 12
+DOUBLED_PAWN_PENALTY_EG = 18
+ISOLATED_PAWN_PENALTY_MG = 10
+ISOLATED_PAWN_PENALTY_EG = 12
+
+PASSED_PAWN_BONUS_MG = [0, 5, 10, 20, 35, 60, 90, 0]
+PASSED_PAWN_BONUS_EG = [0, 10, 20, 35, 60, 90, 130, 0]
+
+ROOK_SEMIOPEN_FILE_BONUS_MG = 15
+ROOK_OPEN_FILE_BONUS_MG = 28
+ROOK_SEMIOPEN_FILE_BONUS_EG = 10
+ROOK_OPEN_FILE_BONUS_EG = 20
+
+KING_SHIELD_BONUS = 10
+TEMPO_BONUS = 10
+
 PAWN_MG = [
     [0, 0, 0, 0, 0, 0, 0, 0],
     [98, 134, 61, 95, 68, 126, 34, -11],
@@ -185,12 +215,124 @@ PST_EG = {
 }
 
 
+FILE_MASKS = [chess.BB_FILES[file_index] for file_index in range(8)]
+ADJACENT_FILE_MASKS = [
+    (FILE_MASKS[file_index - 1] if file_index > 0 else 0)
+    | (FILE_MASKS[file_index + 1] if file_index < 7 else 0)
+    for file_index in range(8)
+]
+
+
+def _build_passed_masks() -> tuple[list[int], list[int]]:
+    white_masks = [0] * 64
+    black_masks = [0] * 64
+
+    for square in chess.SQUARES:
+        rank = chess.square_rank(square)
+        file_index = chess.square_file(square)
+
+        white_mask = 0
+        black_mask = 0
+        for delta_file in (-1, 0, 1):
+            target_file = file_index + delta_file
+            if target_file < 0 or target_file > 7:
+                continue
+
+            for target_rank in range(rank + 1, 8):
+                white_mask |= chess.BB_SQUARES[chess.square(target_file, target_rank)]
+
+            for target_rank in range(0, rank):
+                black_mask |= chess.BB_SQUARES[chess.square(target_file, target_rank)]
+
+        white_masks[square] = white_mask
+        black_masks[square] = black_mask
+
+    return white_masks, black_masks
+
+
+WHITE_PASSED_MASKS, BLACK_PASSED_MASKS = _build_passed_masks()
+
+
 def _pst_value(table: list[list[int]], square: chess.Square, is_white: bool) -> int:
     if not is_white:
         square = chess.square_mirror(square)
     rank = 7 - chess.square_rank(square)
     file = chess.square_file(square)
     return table[rank][file]
+
+
+def _pawn_structure_score(
+    board: chess.Board,
+    color: chess.Color,
+    own_pawns: int,
+    enemy_pawns: int,
+) -> tuple[int, int]:
+    sign = 1 if color == chess.WHITE else -1
+    mg_score = 0
+    eg_score = 0
+
+    for file_index in range(8):
+        pawn_count = chess.popcount(own_pawns & FILE_MASKS[file_index])
+        if pawn_count > 1:
+            mg_score += sign * (-(pawn_count - 1) * DOUBLED_PAWN_PENALTY_MG)
+            eg_score += sign * (-(pawn_count - 1) * DOUBLED_PAWN_PENALTY_EG)
+
+    passed_masks = WHITE_PASSED_MASKS if color == chess.WHITE else BLACK_PASSED_MASKS
+    for square in board.pieces(chess.PAWN, color):
+        file_index = chess.square_file(square)
+        if (own_pawns & ADJACENT_FILE_MASKS[file_index]) == 0:
+            mg_score += sign * -ISOLATED_PAWN_PENALTY_MG
+            eg_score += sign * -ISOLATED_PAWN_PENALTY_EG
+
+        if (enemy_pawns & passed_masks[square]) == 0:
+            advance = chess.square_rank(square) if color == chess.WHITE else 7 - chess.square_rank(square)
+            mg_score += sign * PASSED_PAWN_BONUS_MG[advance]
+            eg_score += sign * PASSED_PAWN_BONUS_EG[advance]
+
+    return mg_score, eg_score
+
+
+def _rook_file_score(own_rooks: chess.SquareSet, own_pawns: int, enemy_pawns: int, sign: int) -> tuple[int, int]:
+    mg_score = 0
+    eg_score = 0
+
+    for square in own_rooks:
+        file_mask = FILE_MASKS[chess.square_file(square)]
+        if own_pawns & file_mask:
+            continue
+        if enemy_pawns & file_mask:
+            mg_score += sign * ROOK_SEMIOPEN_FILE_BONUS_MG
+            eg_score += sign * ROOK_SEMIOPEN_FILE_BONUS_EG
+        else:
+            mg_score += sign * ROOK_OPEN_FILE_BONUS_MG
+            eg_score += sign * ROOK_OPEN_FILE_BONUS_EG
+
+    return mg_score, eg_score
+
+
+def _king_shield_score(board: chess.Board, color: chess.Color) -> int:
+    king_square = board.king(color)
+    if king_square is None:
+        return 0
+
+    direction = 1 if color == chess.WHITE else -1
+    rank = chess.square_rank(king_square)
+    file_index = chess.square_file(king_square)
+    target_rank = rank + direction
+    if target_rank < 0 or target_rank > 7:
+        return 0
+
+    shield = 0
+    for delta_file in (-1, 0, 1):
+        target_file = file_index + delta_file
+        if target_file < 0 or target_file > 7:
+            continue
+        square = chess.square(target_file, target_rank)
+        piece = board.piece_at(square)
+        if piece is not None and piece.color == color and piece.piece_type == chess.PAWN:
+            shield += 1
+
+    return shield * KING_SHIELD_BONUS
 
 
 def evaluate(board: chess.Board) -> int:
@@ -202,6 +344,9 @@ def evaluate(board: chess.Board) -> int:
     mg_score = 0
     eg_score = 0
     phase = 0
+
+    white_pawns = board.pawns & board.occupied_co[chess.WHITE]
+    black_pawns = board.pawns & board.occupied_co[chess.BLACK]
 
     for piece_type in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING):
         white_squares = board.pieces(piece_type, chess.WHITE)
@@ -216,6 +361,33 @@ def evaluate(board: chess.Board) -> int:
             mg_score -= PIECE_VALUES_MG[piece_type] + _pst_value(PST_MG[piece_type], sq, False)
             eg_score -= PIECE_VALUES_EG[piece_type] + _pst_value(PST_EG[piece_type], sq, False)
 
+    for piece_type in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN):
+        mg_weight = MOBILITY_WEIGHTS_MG[piece_type]
+        eg_weight = MOBILITY_WEIGHTS_EG[piece_type]
+
+        for sq in board.pieces(piece_type, chess.WHITE):
+            mobility = len(board.attacks(sq) & ~board.occupied_co[chess.WHITE])
+            mg_score += mg_weight * mobility
+            eg_score += eg_weight * mobility
+
+        for sq in board.pieces(piece_type, chess.BLACK):
+            mobility = len(board.attacks(sq) & ~board.occupied_co[chess.BLACK])
+            mg_score -= mg_weight * mobility
+            eg_score -= eg_weight * mobility
+
+    white_pawn_mg, white_pawn_eg = _pawn_structure_score(board, chess.WHITE, white_pawns, black_pawns)
+    black_pawn_mg, black_pawn_eg = _pawn_structure_score(board, chess.BLACK, black_pawns, white_pawns)
+    mg_score += white_pawn_mg + black_pawn_mg
+    eg_score += white_pawn_eg + black_pawn_eg
+
+    white_rook_mg, white_rook_eg = _rook_file_score(board.pieces(chess.ROOK, chess.WHITE), white_pawns, black_pawns, 1)
+    black_rook_mg, black_rook_eg = _rook_file_score(board.pieces(chess.ROOK, chess.BLACK), black_pawns, white_pawns, -1)
+    mg_score += white_rook_mg + black_rook_mg
+    eg_score += white_rook_eg + black_rook_eg
+
+    mg_score += _king_shield_score(board, chess.WHITE)
+    mg_score -= _king_shield_score(board, chess.BLACK)
+
     if len(board.pieces(chess.BISHOP, chess.WHITE)) >= 2:
         mg_score += BISHOP_PAIR_BONUS
         eg_score += BISHOP_PAIR_BONUS
@@ -225,4 +397,6 @@ def evaluate(board: chess.Board) -> int:
 
     phase = min(phase, MAX_PHASE)
     score = (mg_score * phase + eg_score * (MAX_PHASE - phase)) // MAX_PHASE
+
+    score += TEMPO_BONUS
     return score if board.turn == chess.WHITE else -score
